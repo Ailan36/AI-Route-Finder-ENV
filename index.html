@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Route Finding Production System</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+<style>
+body{
+    margin:0;
+    display:flex;
+    height:100vh;
+    font-family:Arial;
+    background:#1e1e1e;
+    color:white;
+}
+#sidebar{
+    width:340px;
+    background:#2d2d2d;
+    padding:20px;
+    overflow:auto;
+}
+#map{
+    flex:1;
+}
+h2{color:#3498db;}
+button{
+    width:100%;
+    padding:12px;
+    margin-top:10px;
+    border:none;
+    background:#3498db;
+    color:white;
+    cursor:pointer;
+}
+button:hover{opacity:.9;}
+.output{
+    background:#111;
+    color:#2ecc71;
+    padding:10px;
+    margin-top:20px;
+    height:180px;
+    overflow:auto;
+    font-family:monospace;
+}
+input[type=range]{width:100%;}
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>ADVANCED ROUTE AGENT</h2>
+
+    <label><input type="radio" name="agent" value="goal"> Goal-Based</label>
+    <label><input type="radio" name="agent" value="utility" checked> Utility-Based</label>
+
+    <p>Time Efficiency</p>
+    <input type="range" id="timeWeight" min="0" max="10" value="8">
+
+    <p>Fuel / Cost Saving</p>
+    <input type="range" id="costWeight" min="0" max="10" value="3">
+
+    <label><input type="checkbox" id="traffic" checked> Heavy Traffic</label>
+
+    <button onclick="generateEnvironment()">GENERATE CONSTRUCTION ZONES</button>
+    <button onclick="executeAgent()">EXECUTE AGENT</button>
+    <button onclick="resetAll()">RESET ALL</button>
+
+    <div class="output" id="output"></div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script>
+let map=L.map("map").setView([19.0760,72.8777],12);
+
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{
+    maxZoom:19
+}).addTo(map);
+
+let startCoord=null;
+let endCoord=null;
+let startMarker=null;
+let endMarker=null;
+let routeLine=null;
+let envMarkers=[];
+
+function log(msg){
+    let box=document.getElementById("output");
+    box.innerHTML+="● "+msg+"<br>";
+    box.scrollTop=box.scrollHeight;
+}
+
+function clearRoute(){
+    if(routeLine){
+        map.removeLayer(routeLine);
+        routeLine=null;
+    }
+}
+
+function createMarker(latlng,label,color){
+    return L.circleMarker(latlng,{
+        radius:8,
+        color:color,
+        fillColor:color,
+        fillOpacity:1
+    }).addTo(map).bindPopup(label);
+}
+
+function setStart(latlng){
+    if(startMarker) map.removeLayer(startMarker);
+    startCoord=latlng;
+    startMarker=createMarker(latlng,"START","#3498db");
+
+    startMarker.on("click",()=>{
+        map.removeLayer(startMarker);
+        startMarker=null;
+        startCoord=null;
+        clearRoute();
+        log("Start point removed.");
+    });
+
+    log("Start selected.");
+}
+
+function setEnd(latlng){
+    if(endMarker) map.removeLayer(endMarker);
+    endCoord=latlng;
+    endMarker=createMarker(latlng,"GOAL","#e74c3c");
+
+    endMarker.on("click",()=>{
+        map.removeLayer(endMarker);
+        endMarker=null;
+        endCoord=null;
+        clearRoute();
+        log("Goal point removed.");
+    });
+
+    log("Goal selected.");
+}
+
+map.on("click",(e)=>{
+    if(!startCoord){
+        setStart(e.latlng);
+    }else if(!endCoord){
+        setEnd(e.latlng);
+    }
+});
+
+function generateEnvironment(){
+    envMarkers.forEach(m=>map.removeLayer(m));
+    envMarkers=[];
+
+    if(!startCoord){
+        alert("Set start point first.");
+        return;
+    }
+
+    for(let i=0;i<3;i++){
+        let lat=startCoord.lat+(Math.random()-0.5)*0.04;
+        let lng=startCoord.lng+(Math.random()-0.5)*0.04;
+
+        let marker=L.circleMarker([lat,lng],{
+            radius:6
+        }).addTo(map).bindPopup("CONSTRUCTION");
+
+        envMarkers.push(marker);
+    }
+
+    log("3 construction zones generated.");
+}
+
+async function executeAgent(){
+    if(!startCoord || !endCoord){
+        alert("Select both points.");
+        return;
+    }
+
+    clearRoute();
+
+    let agent=document.querySelector('input[name="agent"]:checked').value;
+    let timeWeight=parseInt(document.getElementById("timeWeight").value);
+    let costWeight=parseInt(document.getElementById("costWeight").value);
+    let traffic=document.getElementById("traffic").checked;
+    let penalty=traffic?1.5:1;
+
+    log("Activating "+agent.toUpperCase()+" agent...");
+
+    let url=`https://router.project-osrm.org/route/v1/driving/${startCoord.lng},${startCoord.lat};${endCoord.lng},${endCoord.lat}?overview=full&geometries=geojson`;
+
+    if(agent==="utility"){
+        url+="&alternatives=true";
+    }
+
+    let response=await fetch(url);
+    let data=await response.json();
+
+    if(data.code!=="Ok"){
+        log("No route found.");
+        return;
+    }
+
+    let best=data.routes[0];
+
+    if(agent==="utility"){
+        best=data.routes.reduce((a,b)=>{
+            let scoreA=(a.duration*timeWeight*penalty)+(a.distance*costWeight);
+            let scoreB=(b.duration*timeWeight*penalty)+(b.distance*costWeight);
+            return scoreB<scoreA?b:a;
+        });
+    }
+
+    let coords=best.geometry.coordinates.map(c=>[c[1],c[0]]);
+
+    routeLine=L.polyline(coords,{
+        color:"#3498db",
+        weight:6
+    }).addTo(map);
+
+    map.fitBounds(routeLine.getBounds());
+
+    let dist=(best.distance/1000).toFixed(2);
+    let time=((best.duration/60)*penalty).toFixed(1);
+
+    log("Route visualized.");
+    log(`Distance: ${dist} km`);
+    log(`Estimated Time: ${time} min`);
+}
+
+function resetAll(){
+    if(startMarker) map.removeLayer(startMarker);
+    if(endMarker) map.removeLayer(endMarker);
+    clearRoute();
+
+    envMarkers.forEach(m=>map.removeLayer(m));
+    envMarkers=[];
+
+    startCoord=null;
+    endCoord=null;
+    startMarker=null;
+    endMarker=null;
+
+    log("System reset.");
+}
+</script>
+
+</body>
+</html>
